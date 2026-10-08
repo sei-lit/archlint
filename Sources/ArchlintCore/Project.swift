@@ -135,19 +135,16 @@ final class FactCache: @unchecked Sendable {
         }
         lock.unlock()
         let contents = try tree.read(missing.map { Paths.join(directory, $0) })
-        var extracted = [FileFacts?](repeating: nil, count: missing.count)
-        extracted.withUnsafeMutableBufferPointer { buffer in
-            let pointer = buffer
-            DispatchQueue.concurrentPerform(iterations: missing.count) { index in
-                let path = missing[index]
-                let data = contents[Paths.join(directory, path)] ?? Data()
-                pointer[index] = FactExtractor.extract(
-                    source: String(decoding: data, as: UTF8.self),
-                    path: path,
-                    module: config.module(of: path)
-                )
-            }
+        let jobs = missing.map { path in
+            (path: path, source: String(decoding: contents[Paths.join(directory, path)] ?? Data(), as: UTF8.self),
+             module: config.module(of: path))
         }
+        let slots = ResultSlots(count: jobs.count)
+        DispatchQueue.concurrentPerform(iterations: jobs.count) { index in
+            let job = jobs[index]
+            slots.set(index, FactExtractor.extract(source: job.source, path: job.path, module: job.module))
+        }
+        let extracted = slots.values
         lock.lock()
         for (index, path) in missing.enumerated() {
             let facts = extracted[index]!
@@ -160,5 +157,27 @@ final class FactCache: @unchecked Sendable {
 
     private func cacheKey(_ tree: SourceTree, _ directory: String, _ path: String) -> String {
         "\(path)\u{0}\(tree.files[Paths.join(directory, path)] ?? "")"
+    }
+}
+
+/// 並列に抽出した結果を添字ごとに受け取る
+private final class ResultSlots: @unchecked Sendable {
+    private var storage: [FileFacts?]
+    private let lock = NSLock()
+
+    init(count: Int) {
+        storage = Array(repeating: nil, count: count)
+    }
+
+    func set(_ index: Int, _ value: FileFacts) {
+        lock.lock()
+        storage[index] = value
+        lock.unlock()
+    }
+
+    var values: [FileFacts?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
