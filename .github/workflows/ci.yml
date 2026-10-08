@@ -4,27 +4,27 @@ on:
     branches: [main]
   pull_request:
 
-jobs:
-  # shellcheck is preinstalled on ubuntu runners only.
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: shellcheck
-        run: shellcheck -x -s bash bin/archlint tests/run.sh
+permissions:
+  contents: read
 
+jobs:
+  # 利用者の多くは macOS だが、GitHub の macOS runner は Xcode（Swift 6.4）の版が固定できないため、
+  # Swift の版を固定できる公式イメージの Linux で検証する
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    container: swift:6.4
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: install ast-grep
-        run: npm install -g @ast-grep/cli@0.45.3
-      - name: tests
-        run: tests/run.sh
+        run: |
+          apt-get update -qq && apt-get install -y -qq unzip
+          curl -fsSL -o /tmp/ast-grep.zip https://github.com/ast-grep/ast-grep/releases/download/0.45.3/app-x86_64-unknown-linux-gnu.zip
+          echo "f8ac830881339d1edee6b2652f54798c0f4da5a827f2db38a08ee31117783ce8  /tmp/ast-grep.zip" | sha256sum -c -
+          unzip -q /tmp/ast-grep.zip -d /opt/ast-grep
+      - name: test
+        run: swift test
+        env:
+          ARCHLINT_TEST_AST_GREP: /opt/ast-grep/ast-grep
+      - name: build release
+        run: swift build -c release

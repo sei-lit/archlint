@@ -1,174 +1,153 @@
 # archlint
 
-[日本語 README](README.ja.md)
+[日本語の README](README.ja.md)
 
-`archlint` runs project-specific conventions, written as [ast-grep](https://ast-grep.github.io/)
-YAML rules, against your code before each commit.
+`archlint` checks project-specific Swift conventions, written as YAML rules, before you commit.
 
-archlint ships no rules. The repository that uses it keeps a standard ast-grep
-`sgconfig.yml` and the rule files, and passes the config to archlint with
-`--config`. archlint decides what to scan (for example, only the staged content),
-runs ast-grep, prints the diagnostics, and returns an exit code a pre-commit hook
-can act on.
+[ast-grep](https://ast-grep.github.io/) only sees the syntax tree of one file at a time. archlint uses [SwiftSyntax](https://github.com/swiftlang/swift-syntax) to collect *facts* (types, members, calls, typealiases) from every file, so YAML rules can express checks such as:
 
-## Install
+- a type that becomes a `View` through `extension A: View {}` in another file
+- a property whose type is `typealias Handler = () -> Void` declared in another file
+- a string put in `let title = "..."` inside a function and then passed to `Text(title)`
+- nested conditional compilation, including an `#if` inside `#if DEBUG`
 
-```bash
-git clone https://github.com/sei-lit/archlint.git ~/.archlint
-ln -s ~/.archlint/bin/archlint /usr/local/bin/archlint
-```
+It reads syntax only and never builds, so a pre-commit check of 3,900 files takes 2–3 seconds. The trade-off: inferred types and declarations that are not in the sources (SDKs and so on) are unknown.
 
-Requirements:
+Rules that only need one file can stay ast-grep rules; archlint runs them from the same command.
 
-- git
-- python3, 3.9 or later (the python3 that ships with Xcode on macOS works). Only
-  the standard library is used.
-- [ast-grep](https://ast-grep.github.io/guide/quick-start.html#installation)
-  (`npm install -g @ast-grep/cli`, `brew install ast-grep`, or
-  `cargo install ast-grep --locked`)
+## Installation
 
-`bin/archlint` is a small bash 3.2 compatible shim that finds python3 and runs
-`lib/archlint.py`.
-
-## Usage
-
-### 1. Describe the rules in your repository
-
-An ast-grep project is a `sgconfig.yml` plus rule files. For example, in `app/`:
-
-```yaml
-# app/sgconfig.yml
-ruleDirs:
-  - rules
-testConfigs:
-  - testDir: rule-tests
-```
-
-```yaml
-# app/rules/no-japanese-text-literal.yml
-id: no-japanese-text-literal
-language: swift
-severity: error
-message: Do not pass a Japanese literal to Text.
-note: Use a localized string.
-files:
-  - Views/**
-rule:
-  pattern: Text($ARG)
-constraints:
-  ARG:
-    regex: '[ぁ-んァ-ン一-龥]'
-```
-
-```yaml
-# app/rule-tests/no-japanese-text-literal-test.yml
-id: no-japanese-text-literal
-valid:
-  - Text("hello")
-invalid:
-  - Text("こんにちは")
-```
-
-The `files` and `ignores` fields of a rule are resolved relative to the directory
-that holds `sgconfig.yml`.
-
-### 2. Check before committing
+Requires Swift 6.4 (Xcode 27) or later.
 
 ```bash
-archlint check --config app/sgconfig.yml --staged
+git clone https://github.com/sei-lit/archlint.git
+cd archlint
+swift build -c release
+# .build/release/archlint
 ```
 
-Example pre-commit hook (`.git/hooks/pre-commit`, or the hook runner you already use):
+The first build compiles swift-syntax and takes 2–3 minutes. In a consuming repository, pin a tag and its commit SHA, build once, and cache the binary.
 
-```bash
-#!/bin/bash
-exec archlint check --config app/sgconfig.yml --staged --ast-grep-version 0.45.3
+## Configuration: `archlint.yml`
+
+All paths are relative to the directory that contains this file.
+
+```yaml
+version: 1
+sources:                     # files to collect facts from (the scope of cross-file checks)
+  - Sources/**
+ignores:
+  - Sources/**/Generated/**
+module: '^Sources/(?<module>[^/]+)/'   # optional; tells same-named types in different modules apart
+rules: lint/rules            # directory of rules (*.yml)
+tests: lint/rule-tests       # optional; rule tests
+baseline: lint/baseline.json # optional; violations that existed when the rules were introduced
+astGrep:                     # optional; also run ast-grep rules
+  config: sgconfig.yml
 ```
 
-`--staged` checks the content in the git index, not the working tree, so a
-partially staged file is checked as it will be committed. archlint exports the
-staged files under the config directory, plus the `*.yml` / `*.yaml` files in that
-directory from the index (the rules and the config), to a temporary directory,
-runs ast-grep there, and removes the directory afterwards. A rule change that you
-are committing is therefore applied in the same commit.
+## Rules
 
-Output, one line per diagnostic (line and column start at 1, the path is relative
-to the repository root):
-
+```yaml
+id: closure-view-must-be-auto-equatable
+severity: warning            # error (default) or warning
+message: Views holding closures must be @AutoEquatable
+note: See docs/views.md      # optional
+files: [Sources/Features/**] # optional; limits where diagnostics are reported
+ignores: []                  # optional
+select:                      # what to check: exactly one of type / member / call
+  type:
+    kind: struct
+    inherits: View
+    has:
+      member: { stored: true, type: { function: true } }
+    not:
+      has:
+        member: { attribute: [StateObject, ObservedObject, Binding] }
+require:                     # optional; what a selected entity must satisfy. Without it, every selected entity is a violation
+  attribute: AutoEquatable
+  inherits: EquatableBodyView
 ```
-app/Views/A.swift:3:9: error[no-japanese-text-literal]: Do not pass a Japanese literal to Text.
-  note: Use a localized string.
-```
 
-A one-line summary goes to stderr.
+### Conditions
 
-### 3. Suppress a diagnostic
+- Values: a string matches exactly, `/.../` is a regular expression, and a list matches any of its items
+- All conditions in one mapping must hold. Combine them with `all` / `any` / `not`
+- An unknown key is a configuration error (exit status 2), so a typo cannot silently drop a condition and let everything pass
 
-Use ast-grep's own comment, on the line above the code or at the end of the same line:
+| Entity | Keys |
+|---|---|
+| any | `all` `any` `not`, `file` (glob), `module`, `preview` (inside `#Preview` / a `PreviewProvider`), `condition` (an enclosing `#if` condition; the `#else` branch is `!DEBUG`) |
+| `type` | `kind` (struct / class / enum / actor / protocol), `name`, `qualifiedName` (`Outer.Inner`), `attribute`, `inherits` (including conformances added by extensions in any file), `has: { member: … }` / `has: { call: … }` |
+| `member` | `kind` (func / var / let / init / subscript), `name`, `declaredIn` (type / extension / file), `owner` (the owning type, or the extended type), `static`, `stored`, `type`, `returns` (a function's return type, or a computed property's type), `attribute`, `modifier`, `parameter: { label, name, type }`, `in: { type: … }` |
+| `call` | `callee` (`Text`; `navigationTitle` for `x.navigationTitle`), `calleeText`, `argument: { label, kind, value, text }`, `in: { type: …, member: … }` |
+| type references (`type` / `returns` / a parameter's `type`) | `name`, `text`, `opaque` (`View` for `some View`), `function` (a function type after resolving typealiases), `optional`, `not`, `any` |
+
+`argument.kind` is `string` (a string literal without interpolation, including one bound by `let x = "..."` earlier in the same function), `interpolation`, `identifier`, `closure` or `other`. `value` is the literal's text without its interpolated parts. An unlabeled argument has the label `_`.
+
+Typealiases are looked up in the owning type, then its enclosing types, then at file level. If one level has more than one candidate, the alias is ambiguous and is left unresolved.
+
+Run `archlint facts <file.swift>` to see the facts a rule can use.
+
+### Suppressing a diagnostic
+
+Put the rule ID and the reason in the comment right before the declaration or call:
 
 ```swift
-// ast-grep-ignore: no-japanese-text-literal
-let v = Text("こんにちは")
+// archlint-ignore: closure-view-must-be-auto-equatable wraps a view from an external SDK
+struct SDKWrapperView: View { … }
 ```
 
-`// ast-grep-ignore` without a rule id suppresses every rule on that line.
+## Rule tests
 
-### 4. Test the rules
+```yaml
+id: closure-view-must-be-auto-equatable
+valid:
+  - '@AutoEquatable struct A: EquatableBodyView, View { let onTap: () -> Void; var equatableBody: some View { EmptyView() } }'
+invalid:
+  - files:                   # a cross-file case is a set of files
+      Handler.swift: typealias Handler = () -> Void
+      A.swift: 'struct A: View { let onTap: Handler; var body: some View { EmptyView() } }'
+```
+
+Run them with `archlint test --config archlint.yml` (this also runs the ast-grep rule tests).
+
+## Checking before a commit
 
 ```bash
-archlint test --config app/sgconfig.yml
+archlint check --staged --config app/archlint.yml
 ```
 
-Runs `ast-grep test --skip-snapshot-tests` and returns its exit code. Run it in CI
-so that rule changes are verified.
+- It checks the content of the git index, which is what will be committed. Unstaged edits are ignored. The configuration, rules and baseline are read from the index too
+- A cross-file rule can make an unchanged file violate (for example, when a typealias becomes a function type). So archlint evaluates both the index and HEAD with the same rules and reports **violations added since HEAD**, wherever they are, not only in staged files
+- Violations already in HEAD or in the baseline do not block the commit
+- A file with syntax errors yields incomplete facts, so a syntax error in a staged file stops the check with exit status 2
+- ast-grep rules check only the staged files, because they are confined to one file
 
-## Commands
+Use the exit status in a pre-commit hook: 0 no problems, 1 error-severity violations, 2 environment, configuration or usage error.
 
-| Command | What it does |
-| --- | --- |
-| `archlint check --config <sgconfig.yml> --staged` | Scans the staged content of files under the config directory. Exits 0 without output when none of them is staged. Added, copied, modified and renamed files are scanned; deleted files are not. |
-| `archlint check --config <sgconfig.yml> [paths...]` | Scans the working tree. Without paths, scans the whole config directory. |
-| `archlint test --config <sgconfig.yml>` | Runs the rule tests. |
-| `archlint doctor` | Prints the path and version of the ast-grep in use. |
+Without `--staged`, `check` scans the whole working tree and reports violations that are not in the baseline (for CI, when rules change).
 
-`--config` must point to a file inside the git repository that you run archlint in.
-
-### Options
-
-| Option | Meaning |
-| --- | --- |
-| `--ast-grep <path>` | ast-grep executable. Resolution order: `--ast-grep`, then `ARCHLINT_AST_GREP`, then `ast-grep` on PATH. |
-| `--ast-grep-version <X.Y.Z>` | Require exactly this ast-grep version. Also settable with `ARCHLINT_AST_GREP_VERSION`. A different version is an error. |
-
-### Exit codes
-
-| Code | Meaning |
-| --- | --- |
-| 0 | No problems. Diagnostics with severity `warning`, `info` or `hint` are printed but do not fail. |
-| 1 | At least one diagnostic with severity `error`. |
-| 2 | Usage, environment or tool error: missing or out-of-repository config, ast-grep not found or of a different version, ast-grep failed (for example, a rule YAML is broken), or its output could not be parsed as JSON, was not in the expected format, or contradicted its own exit status. archlint does not treat these as a pass. |
-
-## Limitations
-
-- v0.1 cannot restrict diagnostics to the changed lines. If a staged file already
-  contains a violation, the commit is stopped even when the change did not
-  introduce it. Fix the violation, or suppress it with `ast-grep-ignore`.
-- `--staged` checks only regular files in the index. Staged symlinks and
-  submodule entries (gitlinks) are skipped and listed on stderr, because the
-  index does not hold their content and restoring a symlink would make ast-grep
-  read the working tree.
-- The pre-commit check can be bypassed (the `--no-verify` option, a missing hook,
-  edits made on GitHub). Run `archlint check --config <sgconfig.yml>` on the
-  whole tree in CI if those paths must be covered.
-
-## Development
+## Baseline
 
 ```bash
-tests/run.sh            # all tests; requires ast-grep on PATH
-tests/run.sh staged     # tests whose name contains "staged"
+archlint baseline --config app/archlint.yml          # record every current violation (when introducing rules)
+archlint baseline --prune --config app/archlint.yml  # only lower the counts of fixed violations
 ```
 
-CI runs shellcheck and the tests on macOS and Ubuntu with ast-grep 0.45.3.
+The baseline counts violations per rule + file + symbol (type, member, argument labels, callee). It has no line numbers, so moving code does not create new violations. Renaming a file changes the key; regenerate the baseline after a rename.
+
+When a fix makes a count drop below the baseline, `check` fails until you run `--prune`. Keeping the old count would let the same violation come back unnoticed.
+
+## ast-grep
+
+With `astGrep.config`, `check` and `test` also run ast-grep. The executable is taken from `--ast-grep <path>`, then `ARCHLINT_AST_GREP`, then `PATH`. `--ast-grep-version 0.45.3` refuses any other version. Suppress ast-grep diagnostics with ast-grep's own `// ast-grep-ignore: <id>`.
+
+## Out of scope
+
+- Checks that need type inference or build products (the index store)
+- Languages other than Swift
+- Arbitrary scripts inside rules. A check that YAML conditions cannot express is handled by extracting a new kind of fact
 
 ## License
 
