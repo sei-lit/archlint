@@ -146,17 +146,20 @@ so that rule changes are verified.
 | --- | --- |
 | 0 | No problems. Diagnostics with severity `warning`, `info` or `hint` are printed but do not fail. |
 | 1 | At least one diagnostic with severity `error`. |
-| 2 | Usage, environment or tool error: missing or out-of-repository config, ast-grep not found or of a different version, ast-grep failed (for example, a rule YAML is broken), or its output could not be parsed as JSON. archlint does not treat these as a pass. |
+| 2 | Usage, environment or tool error: missing or out-of-repository config, ast-grep not found or of a different version, ast-grep failed (for example, a rule YAML is broken), or its output could not be parsed as JSON, was not in the expected format, or contradicted its own exit status. archlint does not treat these as a pass. |
 
 ## Limitations
 
 - v0.1 cannot restrict diagnostics to the changed lines. If a staged file already
   contains a violation, the commit is stopped even when the change did not
   introduce it. Fix the violation, or suppress it with `ast-grep-ignore`.
-- `--staged` passes the target files as command-line arguments, so a commit with
-  a very large number of files can exceed the operating system's argument length
-  limit.
-- Submodule entries are not handled specially.
+- `--staged` checks only regular files in the index. Staged symlinks and
+  submodule entries (gitlinks) are skipped and listed on stderr, because the
+  index does not hold their content and restoring a symlink would make ast-grep
+  read the working tree.
+- The pre-commit check can be bypassed (the `--no-verify` option, a missing hook,
+  edits made on GitHub). Run `archlint check --config <sgconfig.yml>` on the
+  whole tree in CI if those paths must be covered.
 
 ## Development
 

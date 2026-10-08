@@ -123,6 +123,62 @@ test_staged_violation_reports_one_based_position() {
     assert_eq "$(find "${TMPDIR}" -mindepth 1 | wc -l | tr -d ' ')" "0" "temporary directory removed"
 }
 
+test_staged_symlink_is_skipped_not_followed() {
+    write_violation outside.swift
+    ln -s ../../outside.swift app/Views/Link.swift
+    git add app/Views/Link.swift
+    archlint check --config app/sgconfig.yml --staged
+    assert_eq "${RC}" "0"
+    assert_contains "${ERR}" "skipped 1 non-regular file(s)"
+    assert_contains "${ERR}" "app/Views/Link.swift"
+}
+
+test_staged_uses_config_from_index_even_if_deleted_in_worktree() {
+    write_violation app/Views/A.swift
+    git add app/Views/A.swift
+    rm app/sgconfig.yml
+    archlint check --config app/sgconfig.yml --staged
+    assert_eq "${RC}" "1"
+    assert_contains "${OUT}" "app/Views/A.swift:3:9: error[no-japanese-text-literal]"
+}
+
+# A fake ast-grep whose scan prints $FAKE_OUT and exits with $FAKE_RC.
+write_fake_ast_grep() {
+    cat > "${SANDBOX}/fake-ast-grep" <<'SH'
+#!/bin/bash
+if [ "$1" = "--version" ]; then echo "ast-grep 0.0.0"; exit 0; fi
+printf '%s' "${FAKE_OUT}"
+exit "${FAKE_RC}"
+SH
+    chmod +x "${SANDBOX}/fake-ast-grep"
+}
+
+test_exit_1_without_error_diagnostics_is_a_tool_failure() {
+    write_fake_ast_grep
+    write_clean app/Views/A.swift
+    git add app/Views/A.swift
+    FAKE_OUT='[]' FAKE_RC=1 archlint check --config app/sgconfig.yml --staged --ast-grep "${SANDBOX}/fake-ast-grep"
+    assert_eq "${RC}" "2"
+}
+
+test_malformed_diagnostic_is_a_tool_failure() {
+    write_fake_ast_grep
+    write_clean app/Views/A.swift
+    git add app/Views/A.swift
+    FAKE_OUT='[{}]' FAKE_RC=1 archlint check --config app/sgconfig.yml --staged --ast-grep "${SANDBOX}/fake-ast-grep"
+    assert_eq "${RC}" "2"
+    assert_contains "${ERR}" "unexpected"
+}
+
+test_many_staged_files_are_scanned_in_chunks() {
+    local i
+    for i in $(seq 1 450); do write_violation "app/Views/F${i}.swift"; done
+    git add app/Views
+    archlint check --config app/sgconfig.yml --staged
+    assert_eq "${RC}" "1"
+    assert_contains "${ERR}" "450 error(s)"
+}
+
 test_multiline_note_is_indented_on_every_line() {
     python3 - app/rules/no-japanese-text-literal.yml <<'PY'
 import sys
@@ -372,6 +428,11 @@ test_test_command_returns_failure_exit_code() {
 }
 
 for t in \
+    test_staged_symlink_is_skipped_not_followed \
+    test_staged_uses_config_from_index_even_if_deleted_in_worktree \
+    test_exit_1_without_error_diagnostics_is_a_tool_failure \
+    test_malformed_diagnostic_is_a_tool_failure \
+    test_many_staged_files_are_scanned_in_chunks \
     test_multiline_note_is_indented_on_every_line \
     test_staged_violation_reports_one_based_position \
     test_staged_clean_file_passes \

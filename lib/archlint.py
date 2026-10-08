@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 EXIT_OK = 0
 EXIT_VIOLATIONS = 1
 EXIT_ERROR = 2
@@ -93,12 +93,17 @@ def repo_root():
     return os.path.realpath(out)
 
 
-def resolve_config(args, root):
-    """Returns (config path relative to root, config directory relative to root)."""
+def resolve_config(args, root, must_exist=True):
+    """Returns (config path relative to root, config directory relative to root).
+
+    With must_exist=False the file itself may be absent from the working tree: --staged reads the
+    config from the index, so only the directory is resolved on disk.
+    """
     if not args.config:
         raise ArchlintError("--config <sgconfig.yml> is required")
-    full = os.path.realpath(args.config)
-    if not os.path.isfile(full):
+    given = os.path.abspath(args.config)
+    full = os.path.join(os.path.realpath(os.path.dirname(given)), os.path.basename(given))
+    if must_exist and not os.path.isfile(full):
         raise ArchlintError("config not found: %s" % args.config)
     rel = os.path.relpath(full, root)
     if rel == ".." or rel.startswith(".." + os.sep):
@@ -113,6 +118,13 @@ def under(path, directory):
 # --- diagnostics ---------------------------------------------------------------
 
 
+def is_diagnostic(d):
+    if not isinstance(d, dict) or not isinstance(d.get("file"), str):
+        return False
+    start = (d.get("range") or {}).get("start") if isinstance(d.get("range"), dict) else None
+    return isinstance(start, dict) and isinstance(start.get("line"), int) and isinstance(start.get("column"), int)
+
+
 def parse_diagnostics(proc):
     if proc.returncode not in (0, 1):
         raise ArchlintError(
@@ -125,6 +137,15 @@ def parse_diagnostics(proc):
     if not isinstance(data, list):
         raise ArchlintError(
             "ast-grep did not produce a JSON array; refusing to pass.\n%s" % proc.stderr.decode("utf-8", "replace").rstrip()
+        )
+    if not all(is_diagnostic(d) for d in data):
+        raise ArchlintError("ast-grep produced an unexpected diagnostic format; refusing to pass.")
+    # ast-grep exits 1 exactly when an error-severity diagnostic exists. A mismatch means the output
+    # cannot be trusted, so it is reported as a tool failure instead of being turned into a pass or a fail.
+    has_error = any(d.get("severity") == "error" for d in data)
+    if has_error != (proc.returncode == 1):
+        raise ArchlintError(
+            "ast-grep exit status %d does not match its diagnostics; refusing to pass." % proc.returncode
         )
     return data
 
@@ -161,26 +182,58 @@ def report(diagnostics, to_root_relative):
     return EXIT_VIOLATIONS if errors else EXIT_OK
 
 
+# Targets are passed as arguments, so a large commit could exceed the OS argument limit (E2BIG).
+SCAN_CHUNK = 200
+
+
 def scan(ast_grep, config_abs, targets, cwd):
-    proc = run([ast_grep, "scan", "--config", config_abs, "--json=compact"] + targets, cwd=cwd)
-    return parse_diagnostics(proc)
+    diagnostics = []
+    for i in range(0, len(targets), SCAN_CHUNK):
+        chunk = targets[i:i + SCAN_CHUNK]
+        proc = run([ast_grep, "scan", "--config", config_abs, "--json=compact"] + chunk, cwd=cwd)
+        diagnostics.extend(parse_diagnostics(proc))
+    return diagnostics
 
 
 # --- commands ------------------------------------------------------------------
+
+
+REGULAR_MODES = ("100644", "100755")
+
+
+def index_modes(root, directory):
+    """Maps each index path under directory to its file mode (100644, 120000, 160000, ...)."""
+    modes = {}
+    for entry in git(["ls-files", "--stage", "-z", "--", directory], cwd=root).split(b"\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition(b"\t")
+        modes[os.fsdecode(path)] = meta.split(b" ")[0].decode("ascii")
+    return modes
 
 
 def check_staged(ast_grep, root, config_rel, config_dir):
     staged = split_nul(
         git(["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"], cwd=root)
     )
-    targets = [p for p in staged if under(p, config_dir)]
+    modes = index_modes(root, config_dir)
+    if modes.get(config_rel) not in REGULAR_MODES:
+        raise ArchlintError("config is not a regular file in the git index (git add it first): %s" % config_rel)
+
+    staged_under = [p for p in staged if under(p, config_dir)]
+    if not staged_under:
+        return EXIT_OK
+    # Symlinks and submodules (gitlinks) have no file content of their own in the index; restoring a
+    # symlink would make ast-grep read its target from the working tree, breaking the index-only snapshot.
+    targets = [p for p in staged_under if modes.get(p) in REGULAR_MODES]
+    skipped = [p for p in staged_under if modes.get(p) not in REGULAR_MODES]
+    if skipped:
+        sys.stderr.write(
+            "archlint: skipped %d non-regular file(s) (symlink or submodule): %s\n" % (len(skipped), ", ".join(skipped))
+        )
     if not targets:
         return EXIT_OK
-
-    indexed = split_nul(git(["ls-files", "--cached", "-z", "--", config_dir], cwd=root))
-    rule_files = [p for p in indexed if p.endswith((".yml", ".yaml")) and under(p, config_dir)]
-    if config_rel not in indexed:
-        raise ArchlintError("config is not in the git index (git add it first): %s" % config_rel)
+    rule_files = [p for p, m in modes.items() if p.endswith((".yml", ".yaml")) and m in REGULAR_MODES]
 
     tmp = tempfile.mkdtemp(prefix="archlint.")
     try:
@@ -205,7 +258,10 @@ def check_staged(ast_grep, root, config_rel, config_dir):
 
         return report(diagnostics, to_root_relative)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            shutil.rmtree(tmp)
+        except OSError as e:
+            sys.stderr.write("archlint: warning: could not remove temporary directory %s: %s\n" % (tmp, e))
 
 
 def check_worktree(ast_grep, root, config_rel, config_dir, paths):
@@ -224,7 +280,7 @@ def cmd_check(args):
     ast_grep = resolve_ast_grep(args)
     verify_version(ast_grep, args)
     root = repo_root()
-    config_rel, config_dir = resolve_config(args, root)
+    config_rel, config_dir = resolve_config(args, root, must_exist=not args.staged)
     if args.staged:
         if args.paths:
             raise ArchlintError("--staged does not take paths")
