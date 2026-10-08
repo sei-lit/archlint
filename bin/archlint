@@ -1,0 +1,30 @@
+#!/bin/bash
+# archlint — runs ast-grep rules supplied by the consuming repository.
+#
+# A thin shim: finds python3 and hands every argument to lib/archlint.py.
+# Resolves its own installation directory through symlinks so
+# `ln -s .../bin/archlint /usr/local/bin/archlint` works.
+set -euo pipefail
+
+resolve_self() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [ -L "${src}" ]; do
+        dir="$(cd "$(dirname "${src}")" && pwd)"
+        src="$(readlink "${src}")"
+        case "${src}" in /*) ;; *) src="${dir}/${src}" ;; esac
+    done
+    cd "$(dirname "${src}")/.." && pwd
+}
+
+ARCHLINT_ROOT="$(resolve_self)"
+
+if ! PYTHON="$(command -v python3)"; then
+    echo "archlint: python3 (3.9 or later) is required but was not found on PATH" >&2
+    exit 2
+fi
+if ! "${PYTHON}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+    echo "archlint: python3 3.9 or later is required (found ${PYTHON})" >&2
+    exit 2
+fi
+
+exec "${PYTHON}" "${ARCHLINT_ROOT}/lib/archlint.py" "$@"
