@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: install ast-grep
         run: |
-          apt-get update -qq && apt-get install -y -qq unzip
+          apt-get update -qq && apt-get install -y -qq unzip curl ca-certificates
           curl -fsSL -o /tmp/ast-grep.zip https://github.com/ast-grep/ast-grep/releases/download/0.45.3/app-x86_64-unknown-linux-gnu.zip
           echo "f8ac830881339d1edee6b2652f54798c0f4da5a827f2db38a08ee31117783ce8  /tmp/ast-grep.zip" | sha256sum -c -
           unzip -q /tmp/ast-grep.zip -d /opt/ast-grep
