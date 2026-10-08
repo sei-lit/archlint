@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 EXIT_OK = 0
 EXIT_VIOLATIONS = 1
 EXIT_ERROR = 2
@@ -150,7 +150,7 @@ def report(diagnostics, to_root_relative):
     for path, line, col, severity, rule, message, note in rows:
         print("%s:%d:%d: %s[%s]: %s" % (path, line, col, severity, rule, message))
         if note:
-            print("  note: %s" % note)
+            print("  note: %s" % note.rstrip("\n").replace("\n", "\n        "))
         counts[severity] = counts.get(severity, 0) + 1
         files.add(path)
     errors = counts.get("error", 0)

@@ -123,6 +123,22 @@ test_staged_violation_reports_one_based_position() {
     assert_eq "$(find "${TMPDIR}" -mindepth 1 | wc -l | tr -d ' ')" "0" "temporary directory removed"
 }
 
+test_multiline_note_is_indented_on_every_line() {
+    python3 - app/rules/no-japanese-text-literal.yml <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("note: Use a localized string.\n", "note: |\n  First line.\n  Second line.\n")
+open(p, "w").write(s)
+PY
+    git add app/rules/no-japanese-text-literal.yml
+    write_violation app/Views/A.swift
+    git add app/Views/A.swift
+    archlint check --config app/sgconfig.yml --staged
+    assert_eq "${RC}" "1"
+    assert_contains "${OUT}" "  note: First line."
+    assert_contains "${OUT}" "        Second line."
+}
+
 test_staged_clean_file_passes() {
     write_clean app/Views/A.swift
     git add app/Views/A.swift
@@ -356,6 +372,7 @@ test_test_command_returns_failure_exit_code() {
 }
 
 for t in \
+    test_multiline_note_is_indented_on_every_line \
     test_staged_violation_reports_one_based_position \
     test_staged_clean_file_passes \
     test_staged_checks_index_not_worktree_violation_only_in_worktree \
