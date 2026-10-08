@@ -50,6 +50,7 @@ public struct ExtensionFact: Codable, Hashable, Sendable {
     public var inherits: [String]
     public var file: String
     public var line: Int
+    public var context: SourceContext
 }
 
 public enum MemberKind: String, Codable, Sendable {
@@ -109,6 +110,8 @@ public struct CallFact: Codable, Hashable, Sendable {
     public var ownerType: String?
     /// 囲むメンバー（関数・プロパティ・init）の名前
     public var ownerMember: String?
+    /// 囲むメンバーの引数ラベル（`(title:action:)`）。同名の overload を区別する
+    public var ownerSignature: String?
     public var file: String
     public var line: Int
     public var context: SourceContext

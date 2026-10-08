@@ -52,13 +52,17 @@ public final class FactSet {
         for file in files {
             for ext in file.extensions {
                 guard let index = lookupType(ext.extendedType, module: file.module) else { continue }
+                // `#if DEBUG` の中だけの準拠や Preview 用の準拠を、型の宣言に無条件に合わせない
+                let typeContext = types[index].fact.context
+                guard !ext.context.preview || typeContext.preview,
+                      Set(ext.context.conditions).isSubset(of: typeContext.conditions) else { continue }
                 for name in ext.inherits where !types[index].inherits.contains(name) {
                     types[index].inherits.append(name)
                 }
             }
         }
         for file in files {
-            var membersByOwnerAndName: [String: Int] = [:]
+            var membersBySignature: [String: Int] = [:]
             for member in file.members {
                 let owner = member.owner.flatMap { lookupType($0, module: file.module) }
                 let index = members.count
@@ -70,11 +74,13 @@ public final class FactSet {
                     returnsIsFunction: member.returns.map { isFunction($0, owner: member.owner, module: file.module) } ?? false
                 ))
                 if let owner { types[owner].memberIndices.append(index) }
-                membersByOwnerAndName["\(member.owner ?? "")#\(member.name)"] = index
+                membersBySignature[Self.memberKey(owner: member.owner, name: member.name, signature: Self.signature(member))] = index
             }
             for call in file.calls {
                 let owner = call.ownerType.flatMap { lookupType($0, module: file.module) }
-                let member = call.ownerMember.flatMap { membersByOwnerAndName["\(call.ownerType ?? "")#\($0)"] }
+                let member = call.ownerMember.flatMap {
+                    membersBySignature[Self.memberKey(owner: call.ownerType, name: $0, signature: call.ownerSignature ?? "")]
+                }
                 let index = calls.count
                 calls.append(ResolvedCall(fact: call, module: file.module, ownerType: owner, ownerMember: member))
                 if let owner { types[owner].callIndices.append(index) }
@@ -82,8 +88,30 @@ public final class FactSet {
         }
     }
 
-    /// 修飾名で型を探す。同じモジュールを優先し、無ければソース全体で一意なものを使う。曖昧なら nil
+    static func memberKey(owner: String?, name: String, signature: String) -> String {
+        "\(owner ?? "")#\(name)\(signature)"
+    }
+
+    static func signature(_ member: MemberFact) -> String {
+        switch member.kind {
+        case .func, .`init`, .subscript: "(" + member.parameters.map { "\($0.label):" }.joined() + ")"
+        case .var, .let: ""
+        }
+    }
+
+    /// 修飾名で型を探す。同じモジュールを優先し、無ければソース全体で一意なものを使う。曖昧なら nil。
+    /// `FeatureA.Model` のようにモジュール名で修飾した名前は、先頭を外しても探す
     func lookupType(_ name: String, module: String) -> Int? {
+        if let found = lookupExact(name, module: module) { return found }
+        guard let dot = name.firstIndex(of: ".") else { return nil }
+        let qualifier = String(name[..<dot])
+        let rest = String(name[name.index(after: dot)...])
+        guard let candidates = typesByName[rest] else { return nil }
+        let inModule = candidates.filter { types[$0].module == qualifier }
+        return inModule.count == 1 ? inModule[0] : nil
+    }
+
+    private func lookupExact(_ name: String, module: String) -> Int? {
         guard let candidates = typesByName[name], !candidates.isEmpty else { return nil }
         let sameModule = candidates.filter { types[$0].module == module }
         if sameModule.count == 1 { return sameModule[0] }

@@ -77,7 +77,6 @@ public enum Commands {
 
         let files = try cache.facts(tree: tree, directory: project.directory, config: project.config, paths: project.sourceFiles)
         var head: [Diagnostic]?
-        var changed: Set<String> = []
         if options.staged {
             let headTree = try GitTree.head(root: root)
             // HEAD のコードも index のルールで判定する。ルールの変更で既存のコードが違反になっても、
@@ -87,12 +86,8 @@ public enum Commands {
                 paths: project.sourceFiles(in: headTree)
             )
             head = Evaluator.evaluate(project.rules, on: FactSet(files: headFiles)).diagnostics
-            changed = Set(project.sourceFiles.filter {
-                let path = Paths.join(project.directory, $0)
-                return tree.files[path] != headTree.files[path]
-            })
         }
-        try failOnSyntaxErrors(files, changed: options.staged ? changed : nil, directory: project.directory)
+        try failOnSyntaxErrors(files, directory: project.directory)
 
         let evaluation = Evaluator.evaluate(project.rules, on: FactSet(files: files))
         let baseline = try project.loadBaseline()
@@ -125,15 +120,11 @@ public enum Commands {
     }
 
     /// 構文エラーのあるファイルの事実は欠けるので、違反を見落とさないよう検査を通さない。
-    /// --staged では、このコミットで変えていないファイルの構文エラーでは止めない（HEAD で既に壊れていて、このコミットの責任ではないため）
-    static func failOnSyntaxErrors(_ files: [FileFacts], changed: Set<String>?, directory: String) throws {
+    /// このコミットで変えていないファイルでも止める（ファイルをまたぐ判定で、そのファイルの事実が要るため）
+    static func failOnSyntaxErrors(_ files: [FileFacts], directory: String) throws {
         let broken = files.filter { !$0.syntaxErrors.isEmpty }
-        let blocking = broken.filter { changed?.contains($0.path) ?? true }
-        for file in broken where !blocking.contains(where: { $0.path == file.path }) {
-            FileHandle.standardError.write(Data("archlint: warning: 構文エラーがあり、事実が欠けている可能性がある: \(Paths.join(directory, file.path)):\(file.syntaxErrors[0])\n".utf8))
-        }
-        guard blocking.isEmpty else {
-            let list = blocking.map { "  \(Paths.join(directory, $0.path)):\($0.syntaxErrors[0])" }.joined(separator: "\n")
+        guard broken.isEmpty else {
+            let list = broken.map { "  \(Paths.join(directory, $0.path)):\($0.syntaxErrors[0])" }.joined(separator: "\n")
             throw ToolError("構文エラーがあるため検査できない:\n\(list)")
         }
     }
@@ -192,7 +183,7 @@ public enum Commands {
         let project = try Project.load(tree: tree, configPath: configPath)
         guard let baselinePath = project.baselinePath else { throw ToolError("設定に baseline のパスが無い") }
         let files = try FactCache().facts(tree: tree, directory: project.directory, config: project.config, paths: project.sourceFiles)
-        try failOnSyntaxErrors(files, changed: nil, directory: project.directory)
+        try failOnSyntaxErrors(files, directory: project.directory)
         let diagnostics = Evaluator.evaluate(project.rules, on: FactSet(files: files)).diagnostics
         let current = try project.loadBaseline()
         let updated = options.prune ? current.pruned(against: diagnostics) : Baseline(diagnostics)
@@ -228,7 +219,7 @@ public enum Commands {
         if let tests = project.config.tests {
             let directory = Paths.join(project.directory, tests)
             let files = tree.files(under: directory).filter { $0.hasSuffix(".yml") || $0.hasSuffix(".yaml") }
-            passed = try RuleTests.run(files: files, tree: tree, rules: project.rules) && passed
+            passed = try RuleTests.run(files: files, tree: tree, rules: project.rules, config: project.config) && passed
         }
         if let astGrepConfig = project.config.astGrepConfig {
             let astGrep = try AstGrep.resolve(options.astGrep, requiredVersion: options.astGrepVersion)
@@ -283,7 +274,8 @@ enum RuleTests {
         let files: [String: String]
     }
 
-    static func run(files: [String], tree: SourceTree, rules: [Rule]) throws -> Bool {
+    /// テストのファイル名にも設定の module を当てる（モジュールをまたぐ解決を本番と同じ規則で確かめるため）
+    static func run(files: [String], tree: SourceTree, rules: [Rule], config: Config) throws -> Bool {
         let byID = Dictionary(uniqueKeysWithValues: rules.map { ($0.id, $0) })
         var failures: [String] = []
         var total = 0
@@ -304,7 +296,7 @@ enum RuleTests {
                     total += 1
                     let testCase = try parseCase(raw, at: "\(path) \(key)[\(index)]")
                     let facts = testCase.files.sorted { $0.key < $1.key }.map {
-                        FactExtractor.extract(source: $0.value, path: $0.key, module: "")
+                        FactExtractor.extract(source: $0.value, path: $0.key, module: config.module(of: $0.key))
                     }
                     if let broken = facts.first(where: { !$0.syntaxErrors.isEmpty }) {
                         failures.append("\(path) \(key)[\(index)]: 構文エラー \(broken.path):\(broken.syntaxErrors[0])")

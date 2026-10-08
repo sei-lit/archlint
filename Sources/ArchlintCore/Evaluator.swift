@@ -52,7 +52,8 @@ extension FactSet {
             return "member \(member.owner.map { "\($0)." } ?? "")\(member.name)\(signature)"
         case .call:
             let call = calls[index].fact
-            return "call \(call.ownerType.map { "\($0)." } ?? "")\(call.ownerMember ?? "_") -> \(call.callee)"
+            let labels = call.arguments.map { "\($0.label):" }.joined()
+            return "call \(call.ownerType.map { "\($0)." } ?? "")\(call.ownerMember ?? "_")\(call.ownerSignature ?? "") -> \(call.callee)(\(labels))"
         }
     }
 }

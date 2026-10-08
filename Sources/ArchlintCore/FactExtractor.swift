@@ -47,10 +47,12 @@ private final class Visitor: SyntaxVisitor {
     private enum Scope {
         case type(qualifiedName: String)
         case `extension`(extendedType: String)
-        case member(name: String)
+        case member(name: String, signature: String)
     }
 
     private var scopes: [Scope] = []
+    /// メンバーの scope を積んだか。ローカルな関数・変数は積まない（呼び出しの所有メンバーにしないため）
+    private var memberPushed: [Bool] = []
     private var conditions: [[String]] = []
     private var previewDepth = 0
 
@@ -80,11 +82,25 @@ private final class Visitor: SyntaxVisitor {
         return nil
     }
 
-    private var memberName: String? {
+    private var member: (name: String, signature: String)? {
         for scope in scopes.reversed() {
-            if case .member(let name) = scope { return name }
+            if case .member(let name, let signature) = scope { return (name, signature) }
         }
         return nil
+    }
+
+    private func pushMember(_ node: some SyntaxProtocol, name: String, signature: String) {
+        let isMember = isMemberDecl(node) || isFileLevelDecl(node)
+        memberPushed.append(isMember)
+        if isMember { scopes.append(.member(name: name, signature: signature)) }
+    }
+
+    private func popMember() {
+        if memberPushed.removeLast() { scopes.removeLast() }
+    }
+
+    static func signature(_ parameters: [Parameter]) -> String {
+        "(" + parameters.map { "\($0.label):" }.joined() + ")"
     }
 
     private func qualified(_ name: String) -> String {
@@ -240,7 +256,8 @@ private final class Visitor: SyntaxVisitor {
             extendedType: extendedName,
             inherits: inherits,
             file: facts.path,
-            line: line(node)
+            line: line(node),
+            context: context
         ))
         if inherits.contains("PreviewProvider") { previewDepth += 1 }
         scopes.append(.extension(extendedType: extendedName))
@@ -319,11 +336,11 @@ private final class Visitor: SyntaxVisitor {
             parameters: Self.parameters(node.signature.parameterClause),
             node: node
         )
-        scopes.append(.member(name: node.name.text))
+        pushMember(node, name: node.name.text, signature: Self.signature(Self.parameters(node.signature.parameterClause)))
         return .visitChildren
     }
 
-    override func visitPost(_ node: FunctionDeclSyntax) { scopes.removeLast() }
+    override func visitPost(_ node: FunctionDeclSyntax) { popMember() }
 
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
         appendMember(
@@ -337,11 +354,11 @@ private final class Visitor: SyntaxVisitor {
             parameters: Self.parameters(node.signature.parameterClause),
             node: node
         )
-        scopes.append(.member(name: "init"))
+        pushMember(node, name: "init", signature: Self.signature(Self.parameters(node.signature.parameterClause)))
         return .visitChildren
     }
 
-    override func visitPost(_ node: InitializerDeclSyntax) { scopes.removeLast() }
+    override func visitPost(_ node: InitializerDeclSyntax) { popMember() }
 
     override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
         appendMember(
@@ -355,11 +372,11 @@ private final class Visitor: SyntaxVisitor {
             parameters: Self.parameters(node.parameterClause),
             node: node
         )
-        scopes.append(.member(name: "subscript"))
+        pushMember(node, name: "subscript", signature: Self.signature(Self.parameters(node.parameterClause)))
         return .visitChildren
     }
 
-    override func visitPost(_ node: SubscriptDeclSyntax) { scopes.removeLast() }
+    override func visitPost(_ node: SubscriptDeclSyntax) { popMember() }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         let isLet = node.bindingSpecifier.tokenKind == .keyword(.let)
@@ -382,11 +399,11 @@ private final class Visitor: SyntaxVisitor {
                 node: node
             )
         }
-        scopes.append(.member(name: names.first ?? "_"))
+        pushMember(node, name: names.first ?? "_", signature: "")
         return .visitChildren
     }
 
-    override func visitPost(_ node: VariableDeclSyntax) { scopes.removeLast() }
+    override func visitPost(_ node: VariableDeclSyntax) { popMember() }
 
     // MARK: - 呼び出し
 
@@ -411,7 +428,8 @@ private final class Visitor: SyntaxVisitor {
             calleeText: calleeText,
             arguments: arguments,
             ownerType: ownerName,
-            ownerMember: memberName,
+            ownerMember: member?.name,
+            ownerSignature: member?.signature,
             file: facts.path,
             line: line(node),
             context: context,
@@ -462,17 +480,22 @@ private final class Visitor: SyntaxVisitor {
                 return nil
             }
             if let list = node.as(CodeBlockItemListSyntax.self) {
-                var found: StringLiteralExprSyntax?
+                // 最も近い（後の）宣言だけを見る。内側の宣言が文字列リテラルでなければ、外側のリテラルは使わない
+                var nearest: VariableDeclSyntax?
+                var nearestBinding: PatternBindingSyntax?
                 for item in list {
                     if item.id == child.id { break }
-                    guard let variable = item.item.as(VariableDeclSyntax.self),
-                          variable.bindingSpecifier.tokenKind == .keyword(.let) else { continue }
-                    for binding in variable.bindings {
-                        guard binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == name else { continue }
-                        found = binding.initializer?.value.as(StringLiteralExprSyntax.self)
+                    guard let variable = item.item.as(VariableDeclSyntax.self) else { continue }
+                    for binding in variable.bindings
+                    where binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == name {
+                        nearest = variable
+                        nearestBinding = binding
                     }
                 }
-                if let found { return found }
+                if let nearest, let nearestBinding {
+                    guard nearest.bindingSpecifier.tokenKind == .keyword(.let) else { return nil }
+                    return nearestBinding.initializer?.value.as(StringLiteralExprSyntax.self)
+                }
             }
             child = node
             current = node.parent
@@ -554,33 +577,33 @@ private final class Visitor: SyntaxVisitor {
         text.split(separator: ".").last.map(String.init) ?? text
     }
 
-    /// 直前のコメントに書いた `archlint-ignore: id1, id2`
+    /// 直前のコメントに書いた `archlint-ignore: id1,id2 理由`。空行を挟んだコメントは対象にしない
     static func ignores(_ node: some SyntaxProtocol) -> [String] {
-        var result: [String] = []
-        for piece in node.leadingTrivia {
-            let text: String
+        var comments: [String] = []
+        var newlines = 0
+        for piece in node.leadingTrivia.reversed() {
             switch piece {
+            case .newlines(let count), .carriageReturnLineFeeds(let count):
+                newlines += count
+            case .carriageReturns(let count):
+                newlines += count
             case .lineComment(let comment), .blockComment(let comment), .docLineComment(let comment), .docBlockComment(let comment):
-                text = comment
+                comments.append(comment)
+                newlines = 0
             default:
-                continue
+                break
             }
-            guard let range = text.range(of: "archlint-ignore:") else { continue }
-            result.append(contentsOf: ignoreIDs(String(text[range.upperBound...])))
+            if newlines >= 2 { break }
         }
-        return result
+        return comments.flatMap { comment -> [String] in
+            guard let range = comment.range(of: "archlint-ignore:") else { return [] }
+            return ignoreIDs(String(comment[range.upperBound...]))
+        }
     }
 
-    /// ID は英数字・ハイフン・アンダースコアで、カンマか空白で区切る。最初の ID でない語から後ろは理由として読む
+    /// 最初の語をカンマ区切りの ID として読む。後ろは理由（英語でもよい）
     static func ignoreIDs(_ text: String) -> [String] {
-        var ids: [String] = []
-        for word in text.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "*" || $0 == "/" }) {
-            let isID = word.unicodeScalars.allSatisfy { scalar in
-                scalar.isASCII && (CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_")
-            }
-            guard isID else { break }
-            ids.append(String(word))
-        }
-        return ids
+        guard let first = text.split(whereSeparator: { $0 == " " || $0 == "\t" }).first else { return [] }
+        return first.split(separator: ",").map(String.init).filter { !$0.isEmpty && $0 != "*/" }
     }
 }

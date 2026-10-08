@@ -125,6 +125,15 @@ private let closureView = "struct A: View { let onTap: Handler; var body: some V
         #expect(throws: ToolError.self) { try repo.check() }
     }
 
+    @Test func syntaxErrorInAnUnchangedFileIsAlsoAToolError() throws {
+        let repo = try Repository()
+        try repo.write("app/Sources/A.swift", "struct A {\n  var x: = 1\n}")
+        try repo.record()
+        try repo.write("app/Sources/B.swift", "struct B {}")
+        try repo.stageAll()
+        #expect(throws: ToolError.self) { try repo.check() }
+    }
+
     @Test func configMustBeInTheIndex() throws {
         let repo = try Repository()
         try repo.write("app/Sources/A.swift", plainView)

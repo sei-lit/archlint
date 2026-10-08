@@ -91,7 +91,7 @@ Run `archlint facts <file.swift>` to see the facts a rule can use.
 
 ### Suppressing a diagnostic
 
-Put the rule ID and the reason in the comment right before the declaration or call:
+Put the rule ID and the reason in the comment right before the declaration or call, with no blank line in between. Separate several rule IDs with commas (`archlint-ignore: rule-a,rule-b reason`); everything after the first word is the reason.
 
 ```swift
 // archlint-ignore: closure-view-must-be-auto-equatable wraps a view from an external SDK
@@ -121,7 +121,7 @@ archlint check --staged --config app/archlint.yml
 - It checks the content of the git index, which is what will be committed. Unstaged edits are ignored. The configuration, rules and baseline are read from the index too
 - A cross-file rule can make an unchanged file violate (for example, when a typealias becomes a function type). So archlint evaluates both the index and HEAD with the same rules and reports **violations added since HEAD**, wherever they are, not only in staged files
 - Violations already in HEAD or in the baseline do not block the commit
-- A file with syntax errors yields incomplete facts, so a syntax error in a staged file stops the check with exit status 2
+- A file with syntax errors yields incomplete facts, so a syntax error in any source file stops the check with exit status 2 (unchanged files included, because cross-file rules need their facts)
 - ast-grep rules check only the staged files, because they are confined to one file
 
 Use the exit status in a pre-commit hook: 0 no problems, 1 error-severity violations, 2 environment, configuration or usage error.

@@ -304,7 +304,13 @@ struct PredicateCompiler {
             return { set, index in matcher.matchesAny(set.members[index].fact.modifiers) }
         case "parameter":
             let predicate = try compileParameter(body, path: path)
-            return { set, index in set.members[index].fact.parameters.contains { predicate(set, $0) } }
+            return { set, index in
+                let member = set.members[index]
+                return member.fact.parameters.contains { parameter in
+                    let resolved = parameter.type.map { set.isFunction($0, owner: member.fact.owner, module: member.module) } ?? false
+                    return predicate(parameter, resolved)
+                }
+            }
         case "in":
             let predicate = try compileIn(body, path: path, allowMember: false)
             return { set, index in predicate(set, set.members[index].ownerType, nil) }
@@ -387,18 +393,19 @@ struct PredicateCompiler {
         return { ref, resolved in predicates.allSatisfy { $0(ref, resolved) } }
     }
 
-    private func compileParameter(_ body: Any, path: String) throws -> (FactSet, Parameter) -> Bool {
+    /// 引数の型が関数型かは、typealias を解決した結果（resolvedFunction）で判定する
+    private func compileParameter(_ body: Any, path: String) throws -> (Parameter, Bool) -> Bool {
         let at = "\(source) \(path)"
         guard let map = body as? [String: Any] else { throw ConfigError("\(at): 引数の条件は mapping で書く") }
         try checkKeys(map, allowed: ["label", "name", "type"], at: at)
         let label = try map["label"].map { try StringMatcher($0, at: "\(at).label") }
         let name = try map["name"].map { try StringMatcher($0, at: "\(at).name") }
         let type = try map["type"].map { try compileTypeRef($0, path: "\(path).type") }
-        return { _, parameter in
+        return { parameter, resolvedFunction in
             if let label, !label.matches(parameter.label) { return false }
             if let name, !name.matches(parameter.name) { return false }
             if let type {
-                guard let ref = parameter.type, type(ref, ref.function) else { return false }
+                guard let ref = parameter.type, type(ref, resolvedFunction) else { return false }
             }
             return true
         }

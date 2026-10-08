@@ -276,3 +276,85 @@ select:
         #expect(baseline.pruned(against: current) == Baseline(counts: ["a": 1]))
     }
 }
+
+@Suite struct ReviewRegressionTests {
+    @Test func conditionalExtensionConformanceIsNotMergedIntoTheType() throws {
+        let found = try violations(closureView, [
+            "A.swift": "struct A { let onTap: () -> Void }",
+            "A+Debug.swift": "#if DEBUG\nextension A: View { var body: some View { EmptyView() } }\n#endif",
+        ])
+        #expect(found.isEmpty)
+    }
+
+    @Test func moduleQualifiedExtensionIsMergedIntoThatModulesType() throws {
+        let rule = try Rule.parse(yaml: closureView, source: "test")
+        let facts = [
+            FactExtractor.extract(source: "struct A { let onTap: () -> Void }", path: "FeatureA/A.swift", module: "FeatureA"),
+            FactExtractor.extract(source: "struct A { let onTap: () -> Void }", path: "FeatureB/A.swift", module: "FeatureB"),
+            FactExtractor.extract(source: "extension FeatureA.A: View {}", path: "App/A+View.swift", module: "App"),
+        ]
+        let found = Evaluator.evaluate([rule], on: FactSet(files: facts), applyFileFilters: false).diagnostics
+        #expect(found.map(\.file) == ["FeatureA/A.swift"])
+    }
+
+    @Test func parameterTypeResolvesTypealias() throws {
+        let found = try violations("""
+        id: r
+        message: m
+        select:
+          member: { parameter: { type: { function: true } } }
+        """, "typealias Handler = () -> Void\nfunc f(_ handler: Handler) {}\nfunc g(_ value: Int) {}")
+        #expect(found.map(\.line) == [2])
+    }
+
+    @Test func innerNonLiteralBindingShadowsAnOuterLiteral() throws {
+        let found = try violations(literalText, """
+        func f() {
+            let title = "そと"
+            do {
+                let title = load()
+                Text(title)
+            }
+        }
+        """)
+        #expect(found.isEmpty)
+    }
+
+    @Test func callsInsideALocalVariableBelongToTheEnclosingMethodAndOverloadsAreDistinct() throws {
+        let rule = """
+        id: r
+        message: m
+        select:
+          call:
+            callee: Text
+            in: { member: { name: f, parameter: { label: title } } }
+        """
+        let found = try violations(rule, """
+        struct A {
+            func f(title: String) { let view = Text("a"); _ = view }
+            func f(count: Int) { Text("b") }
+        }
+        """)
+        #expect(found.map(\.line) == [2])
+    }
+
+    @Test func callKeyDistinguishesArgumentLabels() throws {
+        let rule = "id: r\nmessage: m\nselect: { call: { callee: foo } }"
+        let before = try violations(rule, "func f() { foo(old: 1) }")
+        let after = try violations(rule, "func f() { foo(new: 1) }")
+        #expect(before.map(\.key) != after.map(\.key))
+    }
+
+    @Test func ignoreCommentMustBeAdjacentAndReadsOnlyTheFirstWordAsIDs() throws {
+        let rule = try Rule.parse(yaml: closureView, source: "test")
+        let facts = FactExtractor.extract(source: """
+        // archlint-ignore: closure-view
+
+        struct A: View { let onTap: () -> Void; var body: some View { EmptyView() } }
+        // archlint-ignore: other,closure-view temporary workaround for the SDK
+        struct B: View { let onTap: () -> Void; var body: some View { EmptyView() } }
+        """, path: "Test.swift", module: "")
+        let evaluation = Evaluator.evaluate([rule], on: FactSet(files: [facts]), applyFileFilters: false)
+        #expect(evaluation.diagnostics.map(\.line) == [3])
+    }
+}
